@@ -1,0 +1,1829 @@
+---
+title: "Code for: Determining gas transfer velocities and CO2 evasion fluxes from streams using carbon dioxide as a tracer"
+author: "Mollie J. McDowell"
+output:
+  pdf_document:
+    fig_caption: true
+    toc: true
+    toc_depth: 5
+---
+
+<style type="text/css">
+
+h1.title {
+  font-size: 28px;
+  text-align: center;
+}
+h4.author {
+  font-size: 20px;
+  text-align: center;
+}
+h4.date {
+  font-size: 15px;
+  text-align: center;
+}
+</style>
+
+## 1 Introduction
+
+This document provides code associated with the UBC MSc thesis titled "Determining gas transfer velocities and CO2 evasion fluxes from streams using carbon dioxide as a tracer", which is available on [UBC cIRcle](https://open.library.ubc.ca/cIRcle/collections/ubctheses/24/items/1.0355223). All coding was performed in R versions 3.3.0 (R Core Team, 2016) - 3.4.0 (R Core Team, 2017).
+
+## 2 Open packages and source functions for calculations
+
+```{r, message = F, warning = F, tidy=TRUE, tidy.opts=list(width.cutoff=55)}
+library(pacman)
+p_load(tidyverse, lubridate, cowplot, reshape2, openair, nlme, knitr)
+opts_chunk$set(tidy.opts=list(tidy=TRUE,width.cutoff=55))
+```
+
+Descriptions of functions sourced in this document:
+
+* Data cleaning (dataclean_function.R)
+	+ sources outlier_function.R and co2calibration_function.R
+	+ calibrates CO2 concentrations
+	+ subsets data into months and runs outlier test
+	+ input: dataframe
+	+ output: dataframe
+
+* CO2 calibrations (co2calibration_function.R)
+	+ calibrates CO2 concentrations based on temperature and pressure conditions
+	+ input: CO2 (ppm, upstream and downstream), temperature (ºC, upstream and downstream), and depth (mm, upstream and downstream) (vectors)
+	+ output: upstream and downstream CO2 (dataframe)
+
+* Outlier deletion (outlier_function.R)
+	+ runs boxplot outlier test (Tukey method - interquartile range approach) and deletes outliers
+	+ adapted from: https://www.r-bloggers.com/identify-describe-plot-and-remove-the-outliers-from-the-dataset/
+	+ input: dataframe, vector
+	+ output: vector
+
+* k calculations (kcalcs_function.R)
+	+ use for processing CO2 injection files in a directory
+	+ sources: kco2_function.R, k600_function.R, co2calibration_function.R
+	+ calibrates CO2 concentrations, computes relative concentration changes in each sensor during injection
+	+ computes k and k600, mean temp, v, and q
+	+ input: dataframe
+	+ output: 1-row dataframe with datetime, k, k600, stream temperature, flow velocity, discharge
+
+* k calculations - new (kcalcs_new_function.R)
+	+ same as above, but for scripts after moving downstream sensors (change depth)
+	+ input: dataframe
+	+ output: 1-row dataframe with datetime, k, k600, stream temperature, flow velocity, discharge
+
+* kCO2 (kco2_function.R)
+	+ check function script for references for Henry's law and CO2 coefficients
+	+ input: CO2 during injection (ppm, upstream and downstream), CO2 before injection (ppm, upstream and downstream), water temperature (ºC, upstream and downstream)
+	+ output: kCO2 (m/d)
+
+* k600 (k600_function.R)
+	+ calculating k600 (ref: Raymond et al. 2012)
+	+ First, calculate Schmidt number for gas of interest from temp. Next, calculate k600 from Schmidt number and k.
+	+ a, b, c, d are constants
+	+ input: kCO2 (m/d) and mean water temperature (ºC)
+	+ output: k600 (m/d)
+
+* Raymond model k calculations (raymondmodels_function.R)
+	+ calculate 7 models from Raymond et al (2012) during each CO2 injection
+	+ input: dataframe
+	+ output: dataframe with datetime, modeled k600, model std. dev., temperature, q, velocity
+
+* Raymond model - new k calcs (raymondmodels_new_function.R)
+	+ same as above, but after downstream sensors were moved (depth change)
+	+ input: dataframe
+	+ output: dataframe with datetime, modeled k600, model std. dev., temperature, q, velocity
+
+* Discharge from salt injection (saltinjection_function.R)
+	+ calculating discharge from salt slug injection (ref: Moore 2005 and Richardson et al 2016, calibration constant in Richardson et al unpublished)
+	+ ec1 and ec2 are objects containing EC values from upstream and downstream sensors (or columns from dataframe)
+	+ slug_ml is the volume of salt injected in ml
+	+ input: ec1, ec2, slug_ml
+	+ output: discharge
+
+* Continuous discharge (qsalt_function.R)
+	+ calculates continuous discharge from downstream depth based on relationship from salt injections
+	+ input: depth
+	+ output: modeled continuous discharge
+
+* Continuous velocity (vsalt_function.R)
+	+ calculates continuous velocity from downstream depth based on relationship from salt injections
+	+ input: depth
+	+ output: modeled continuous velocity
+
+* Continuous travel time (tsalt_function.R)
+	+ calculates continuous travel time between sensor groups from downstream depth based on relationship from salt injections
+	+ input: depth
+	+ output: modeled continuous travel time
+
+* CO2 flux (efflux_function.R)
+	+ calculates continuous CO2 flux from the stream 
+	+ based on continuous k, continuous upstream pco2, and mean atmospheric CO2 from GC samples
+	+ input: dataframe
+	+ output: modeled continuous CO2 flux
+
+* continuous kco2 (kpred_function.R)
+	+ calculates continuous k from relationship between k and q
+	+ input: dataframe
+	+ output: modeled continuous kCO2
+
+* continuous k600 (k600pred_function.R)
+	+ calculates continuous k600 from relationship between k600 and q
+	+ input: dataframe
+	+ output: modeled continuous k600
+
+```{r, message = FALSE}
+source("scripts/kco2_function.R")
+source("scripts/k600_function.R")
+source("scripts/saltinjection_function.R")
+source("scripts/raymondmodels_function.R")
+source("scripts/co2calibration_function.R")
+source("scripts/outlier_function.R")
+source("scripts/dataclean_function.R")
+source("scripts/qsalt_function.R")
+source("scripts/vsalt_function.R")
+source("scripts/tsalt_function.R")
+source("scripts/kcalcs_function.R")
+source("scripts/raymondmodels_manual_function.R")
+source("scripts/kcalcs_new_function.R")
+source("scripts/efflux_function.R")
+source("scripts/kpred_function.R")
+source("scripts/k600pred_function.R")
+source("scripts/raymondmodels_new_function.R")
+```
+
+## 3 Baseline (30-minute) data processing
+
+First, read in csv (MKRF_30min_ALL.csv) to create dataframe (mkrf.30) and use parse_date_time to format timestamp correctly.
+
+Variables in mkrf.30 are: timestamp, record, batt_volt (V), panel_temp (ºC), co2_1 (ppm), co2_2 (ppm), ctd1_depth (mm), ctd1_temp (ºC), ctd1_ec (us/cm), ctd2_depth (mm), ctd2_temp (ºC), ctd2_ec (us/cm), orp (mV), ldo (), ldo_temp (ºC), gs3_1_temp (ºC), gs3_1_ec (us/cm), gs3_2_temp (ºC), gs3_2_ec (us/cm), sonic_u (m/s), sonic_v (m/s), sonic_w (m/s), and sonic_temp (ºC)
+
+```{r, results = "hide", message = FALSE, warning = FALSE}
+mkrf.30 <- read.csv("data/MKRF_30min_ALL.csv", quote = "")
+mkrf.30$timestamp <- parse_date_time(mkrf.30$timestamp, orders = "mdy HM")
+```
+
+### 3.1 Baseline data cleaning
+
+Next, remove nonsense values (too high/too low). Potential causes of nonsense values: sensor error, sensors out of water, low battery voltage, or artificial elevation of values during CO2 injections. Variables to apply initial cleaning to:
+
+* CO2
+* GS3 electrical conductivity
+* GS3 temperature
+* CTD depth: moved sensors June 7 2017, so CTD depth is 24 cm bigger than weir height
+
+```{r, message = FALSE, warning = FALSE}
+mkrf.30$co2_1 <- ifelse(mkrf.30$co2_1 < 1000, NA, mkrf.30$co2_1)
+mkrf.30$co2_1 <- ifelse(mkrf.30$co2_1 > 2500, NA, mkrf.30$co2_1)
+
+mkrf.30$co2_2 <- ifelse(mkrf.30$co2_2 < 1000, NA, mkrf.30$co2_2)
+mkrf.30$co2_2 <- ifelse(mkrf.30$co2_2 > 2500, NA, mkrf.30$co2_2)
+
+mkrf.30$gs3_1_ec <- ifelse(mkrf.30$gs3_1_ec < 1, NA, mkrf.30$gs3_1_ec)
+mkrf.30$gs3_1_ec <- ifelse(mkrf.30$gs3_1_ec > 20, NA, mkrf.30$gs3_1_ec)
+
+mkrf.30$gs3_2_ec <- ifelse(mkrf.30$gs3_2_ec < 10, NA, mkrf.30$gs3_2_ec)
+mkrf.30$gs3_2_ec <- ifelse(mkrf.30$gs3_2_ec > 16, NA, mkrf.30$gs3_2_ec)
+
+mkrf.30$gs3_1_temp <- ifelse(mkrf.30$gs3_1_temp <= 0, NA, mkrf.30$gs3_1_temp)
+mkrf.30$gs3_1_temp <- ifelse(mkrf.30$gs3_1_temp > 20, NA, mkrf.30$gs3_1_temp)
+
+mkrf.30$gs3_2_temp <- ifelse(mkrf.30$gs3_2_temp <= 0, NA, mkrf.30$gs3_2_temp)
+mkrf.30$gs3_2_temp <- ifelse(mkrf.30$gs3_2_temp > 20, NA, mkrf.30$gs3_2_temp)
+
+mkrf.30$ctd2_depth <- ifelse(mkrf.30$timestamp < "2017-06-07 20:00:00", 
+	mkrf.30$ctd2_depth, mkrf.30$ctd2_depth - 240)
+
+mkrf.30$ctd1_depth <- ifelse(mkrf.30$ctd1_depth <=0, NA, mkrf.30$ctd1_depth)
+mkrf.30$ctd2_depth <- ifelse(mkrf.30$ctd2_depth <=0, NA, mkrf.30$ctd2_depth)
+
+mkrf.30$ph1 <- mkrf.30$ph1 * 1.08
+mkrf.30$ph1 <- ifelse(mkrf.30$ph1 <6.5, NA, mkrf.30$ph1)
+```
+
+Next, use the dataclean function to:
+
+* Calibrate CO2 values (source: co2calibration_function.R)
+* Delete outliers from certain variables - see function description above for list (source: outlier_function.R)
+
+```{r, results = "hide", message = FALSE, warning = FALSE, fig.show = "hide"}
+mkrf.30 <- dataclean(mkrf.30)
+```
+
+Next, calculate continuous discharge and velocity from downstream CTD depth (sources: qsalt_function.R and vsalt_function.R). Calculate wind speed and direction from the anemometer u and v readings.
+```{r, message = FALSE, warning = FALSE}
+mkrf.30$q.salt <- q.salt(mkrf.30$ctd2_depth)
+mkrf.30$v.salt <- v.salt(mkrf.30$ctd2_depth)
+mkrf.30$t.salt <- t.salt(mkrf.30$ctd2_depth)
+
+mkrf.30$q.salt <- ifelse(mkrf.30$q.salt <=0, NA, mkrf.30$q.salt)
+mkrf.30$v.salt <- ifelse(mkrf.30$v.salt <=0, NA, mkrf.30$v.salt)
+mkrf.30$t.salt <- ifelse(mkrf.30$t.salt <=0, NA, mkrf.30$t.salt)
+
+mkrf.30$windspeed <- sqrt(mkrf.30$sonic_u^2 + mkrf.30$sonic_v^2)
+mkrf.30$winddir <- atan2(mkrf.30$sonic_u,mkrf.30$sonic_v)/(pi/180)
+
+mkrf.30$winddir <- ifelse(mkrf.30$winddir < 0, 360 + mkrf.30$winddir, mkrf.30$winddir)
+mkrf.30$windspeed <- ifelse(is.na(mkrf.30$winddir), NA, mkrf.30$windspeed)
+```
+
+Next, calculate continuous CO2 efflux.
+```{r}
+kpred <- kpred(mkrf.30)
+mkrf.30$k <- kpred$k
+mkrf.30$vark <- kpred$vark
+k600pred <- k600pred(mkrf.30)
+
+mkrf.30$k600 <- k600pred$k600
+mkrf.30$vark600 <- k600pred$vark600
+mkrf.30$flux <- efflux(mkrf.30)
+
+mean(mkrf.30$flux, na.rm = T)
+median(mkrf.30$flux, na.rm = T)
+range(mkrf.30$flux, na.rm = T)
+sum(mkrf.30$flux, na.rm = T)
+```
+
+Next, create a new dataframe with time-averaged (6-hour) data for visualization:
+```{r, message = FALSE, warning = FALSE}
+mkrf.30$date <- as.POSIXct(mkrf.30$timestamp)
+mkrf.6hr <- timeAverage(mkrf.30, avg.time = "6 hour")
+mkrf.day <- timeAverage(mkrf.30, avg.time = "1 day")
+```
+
+and daily (1-day) data for visualization:
+```{r, results = "hide", message = FALSE, warning = FALSE}
+day <- strftime(mkrf.30$timestamp, "%d")
+mkrf.30$day <- floor_date(mkrf.30$timestamp, "day")
+
+flux <- ifelse(!is.na(mkrf.30$flux), mkrf.30$flux, mean(na.omit(mkrf.30$flux)))
+
+fluxday <- aggregate(flux, by = list(mkrf.30$day), FUN = sum, simplify = TRUE)
+colnames(fluxday) <- c("date","flux")
+
+fluxday$date<-as.POSIXct(fluxday$date,format="%y-%m-%d")
+```
+
+```{r, eval=FALSE}
+library(zoo)
+fluxday.zoo<-zoo(fluxday[,-1],fluxday[,1], drop = FALSE) #set date to Index
+
+fluxday <- merge(fluxday.zoo, zoo(seq(start(fluxday.zoo), 
+	end(fluxday.zoo),by="day")), all=TRUE)
+fluxday <- as.data.frame(fluxday)
+colnames(fluxday) <- c("date","flux")
+class(fluxday)
+
+ts <- seq.POSIXt(as.POSIXct("2016-11-04",'%y-%m-%d'), 
+	as.POSIXct("2017-06-27",'%y-%m-%d'), by="day")
+
+df <- data.frame(date=ts)
+
+fluxday <- full_join(df,fluxday)
+```
+
+### 3.2 Baseline data calculations
+
+Next, calculate means, medians, and ranges for variables.
+
+CO2 flux:
+```{r}
+mean(fluxday$flux, na.rm = T)
+median(fluxday$flux, na.rm = T)
+range(fluxday$flux, na.rm = T)
+```
+
+CO2 (upstream):
+```{r}
+mean(mkrf.30$co2_1, na.rm = T)
+median(mkrf.30$co2_1, na.rm = T)
+range(mkrf.30$co2_1, na.rm = T)
+```
+
+air temperature:
+```{r}
+mean(mkrf.30$sonic_temp, na.rm = T)
+median(mkrf.30$sonic_temp, na.rm = T)
+range(mkrf.30$sonic_temp, na.rm = T)
+```
+
+stream temp (upstream):
+```{r}
+mean(mkrf.30$gs3_1_temp, na.rm = T)
+median(mkrf.30$gs3_1_temp, na.rm = T)
+range(mkrf.30$gs3_1_temp, na.rm = T)
+```
+
+discharge:
+```{r}
+mean(mkrf.30$q.salt, na.rm = T)
+median(mkrf.30$q.salt, na.rm = T)
+range(mkrf.30$q.salt, na.rm = T)
+```
+
+velocity:
+```{r}
+mean(mkrf.30$v.salt, na.rm = T)
+median(mkrf.30$v.salt, na.rm = T)
+range(mkrf.30$v.salt, na.rm = T)
+```
+
+electrical conductivity:
+```{r}
+mean(c(mkrf.30$gs3_1_ec, mkrf.30$gs3_2_ec), na.rm = T)
+median(c(mkrf.30$gs3_1_ec, mkrf.30$gs3_2_ec), na.rm = T)
+range(c(mkrf.30$gs3_1_ec, mkrf.30$gs3_2_ec), na.rm = T)
+```
+
+wind speed:
+```{r}
+mean(mkrf.30$windspeed, na.rm = T)
+median(mkrf.30$windspeed, na.rm = T)
+range(mkrf.30$windspeed, na.rm = T)
+```
+
+pH:
+```{r}
+mean(mkrf.30$ph1, na.rm = T)
+median(mkrf.30$ph1, na.rm = T)
+range(mkrf.30$ph1, na.rm = T)
+```
+
+kco2:
+```{r}
+mean(mkrf.30$k, na.rm = T)
+median(mkrf.30$k, na.rm = T)
+range(mkrf.30$k, na.rm = T)
+```
+
+k600:
+```{r}
+mean(mkrf.30$k600, na.rm = T)
+median(mkrf.30$k600, na.rm = T)
+range(mkrf.30$k600, na.rm = T)
+```
+
+var k
+```{r}
+mean(mkrf.30$vark, na.rm = T)
+median(mkrf.30$vark, na.rm = T)
+range(mkrf.30$vark, na.rm = T)
+```
+
+var k600
+```{r}
+mean(mkrf.30$vark600, na.rm = T)
+median(mkrf.30$vark600, na.rm = T)
+range(mkrf.30$vark600, na.rm = T)
+```
+
+### 3.3 Flux calculations
+
+**Relationships between flux and discharge/velocity**
+
+Percentage of flux occurring when discharge is > 440 L/s:
+```{r}
+q.440 <- subset(mkrf.30, q.salt > 92.6)
+flux.440 <- sum(q.440$flux, na.rm = T)
+flux.all <- sum(mkrf.30$flux, na.rm = T)
+flux.440/flux.all
+```
+
+Percentage of flux as incoming CO2:
+```{r}
+CO2.1 <- sum(mkrf.30$co2_1, na.rm = T)
+Tw.1.K <- mean(mkrf.30$gs3_1_temp, na.rm = T) + 273.15
+T_K <- 273.15 + 25 # temp in K at STP
+Kh.CO2.stp <- 0.035
+T_depend.CO2 <- 2400 #temperature dependency constant for CO2
+Kh.CO2.1 <- Kh.CO2.stp*exp(T_depend.CO2*(1/Tw.1.K - 1/T_K))
+co2.gCm3 <- Kh.CO2.1 * CO2.1 * 1e-6 * 12 * 1000  # 1e-6 to go from ppm to atm; 
+		# 12 to go from mol CO2 to g of C; 1000 to go from L-1 to m-3
+
+flux.gCm3 <- sum(mkrf.30$flux, na.rm = T)
+
+fluxper <- flux.gCm3/co2.gCm3
+fluxper
+```
+
+Linear model predicting log(flux) from continuous discharge:
+```{r}
+flux.q.lm <- lm(log(flux) ~ q.salt, data = mkrf.day)
+summary(flux.q.lm)
+```
+
+Pearson correlation coefficient for log(flux) and discharge:
+```{r}
+cor(mkrf.day$q.salt, log(mkrf.day$flux), method = "pearson", 
+	use = "pairwise.complete.obs")
+```
+
+Discharge vs flux with linear regression:
+```{r}
+ggplot(mkrf.day, aes(x = q.salt, y = log(flux))) +
+	geom_point() + labs(x = expression(Discharge~(L~s^{-1})), 
+		y = expression(log(F[CO2])~(g~C~L^{-1}~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) 
+```
+
+```{r}
+#ggsave(filename = "q_logflux_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+Linear model predicting log(flux) from continuous velocity:
+```{r}
+mkrf.day <- mkrf.day[-146, ]
+flux.v.loess <- loess(log(flux) ~ v.salt, data = mkrf.day)
+summary(flux.v.loess)
+plot(flux.v.loess$residuals)
+hist(flux.v.loess$residuals)
+mean(flux.v.loess$residuals)
+#lmtest::bptest(flux.v.loess)
+```
+
+```{r}
+lo.pred <- predict(flux.v.loess)
+lo.v <- mkrf.day$v.salt
+lo.v <- lo.v[!is.na(lo.v)]
+lo.df <- cbind(lo.v, lo.pred)
+lo.df <- as.data.frame(lo.df)
+#write.csv(lo.df, "lodf.csv")
+```
+
+Plot velocity vs log(flux) with linear regression line:
+```{r, warning = FALSE}
+ggplot(mkrf.day, aes(x = v.salt, y = log(flux))) +
+	geom_point() + labs(x = expression(Stream~velocity~(m~s^{-1})), 
+		y = expression(log(F[CO2])~(g~C~L^{-1}~d^{-1})), 
+		title = "") + 
+	geom_smooth() +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) 
+```
+
+```{r}
+#ggsave(filename = "v_logflux_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+Flux at high and low discharge:
+```{r, message = FALSE, warning = FALSE}
+hiq.day <- subset(mkrf.30, q.salt > 100)
+hiq.day$qlev <- "hiq"
+
+loq.day <- subset(mkrf.30, q.salt < 100)
+loq.day$qlev <- "loq"
+
+q.day <- rbind(hiq.day, loq.day)
+
+mean(hiq.day$flux, na.rm = T)
+mean(loq.day$flux, na.rm = T)
+```
+
+Boxplot of flux at high and low discharge:
+```{r, message = FALSE, warning = FALSE}
+ggplot(q.day, aes(x = qlev, y = flux)) +
+	geom_boxplot() + 
+	labs(x = "", 
+		y = expression(CO[2]~flux~(g~C~m^{-2}~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High discharge", "Low discharge")) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "flux_hiloq.png", width = 8, height = 6, units = "in")
+```
+
+***
+
+### 3.4 Monthly calculations
+
+Monthly CO2 stats:
+```{r, message = FALSE, warning = FALSE}
+nov <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "11")
+mean(nov$co2_1, na.rm = T)
+median(nov$co2_1, na.rm = T)
+range(nov$co2_1, na.rm = T)
+
+dec <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "12")
+mean(dec$co2_1, na.rm = T)
+median(dec$co2_1, na.rm = T)
+range(dec$co2_1, na.rm = T)
+
+jan <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "01")
+mean(jan$co2_1, na.rm = T)
+median(jan$co2_1, na.rm = T)
+range(jan$co2_1, na.rm = T)
+
+feb <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "02")
+mean(feb$co2_1, na.rm = T)
+median(feb$co2_1, na.rm = T)
+range(feb$co2_1, na.rm = T)
+
+mar <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "03")
+mean(mar$co2_1, na.rm = T)
+median(mar$co2_1, na.rm = T)
+range(mar$co2_1, na.rm = T)
+
+apr <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "04")
+mean(apr$co2_1, na.rm = T)
+median(apr$co2_1, na.rm = T)
+range(apr$co2_1, na.rm = T)
+
+may <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "05")
+mean(may$co2_1, na.rm = T)
+median(may$co2_1, na.rm = T)
+range(may$co2_1, na.rm = T)
+
+jun <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "06")
+mean(jun$co2_1, na.rm = T)
+median(jun$co2_1, na.rm = T)
+range(jun$co2_1, na.rm = T)
+```
+
+Monthly temp stats:
+```{r, message = FALSE, warning = FALSE}
+nov <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "11")
+mean(nov$sonic_temp, na.rm = T)
+median(nov$sonic_temp, na.rm = T)
+range(nov$sonic_temp, na.rm = T)
+
+dec <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "12")
+mean(dec$sonic_temp, na.rm = T)
+median(dec$sonic_temp, na.rm = T)
+range(dec$sonic_temp, na.rm = T)
+
+jan <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "01")
+mean(jan$sonic_temp, na.rm = T)
+median(jan$sonic_temp, na.rm = T)
+range(jan$sonic_temp, na.rm = T)
+
+feb <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "02")
+mean(feb$sonic_temp, na.rm = T)
+median(feb$sonic_temp, na.rm = T)
+range(feb$sonic_temp, na.rm = T)
+
+mar <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "03")
+mean(mar$sonic_temp, na.rm = T)
+median(mar$sonic_temp, na.rm = T)
+range(mar$sonic_temp, na.rm = T)
+
+apr <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "04")
+mean(apr$sonic_temp, na.rm = T)
+median(apr$sonic_temp, na.rm = T)
+range(apr$sonic_temp, na.rm = T)
+
+may <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "05")
+mean(may$sonic_temp, na.rm = T)
+median(may$sonic_temp, na.rm = T)
+range(may$sonic_temp, na.rm = T)
+
+jun <- subset.data.frame(mkrf.30, format(timestamp, "%m") == "06")
+mean(jun$sonic_temp, na.rm = T)
+median(jun$sonic_temp, na.rm = T)
+range(jun$sonic_temp, na.rm = T)
+```
+
+### 3.5 Baseline data visualization
+
+Plot time series baseline data. Delete outliers. First, upstream CO2:
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(mkrf.6hr, aes(x = date, y = co2_2)) +
+	geom_line() + labs(x = "", 
+		y = bquote(CO[2] * " concentration (" * mu * "atm " * atm^{-1}*")"), 
+	title = "") +
+	ylim(1000,2000) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "co2_us_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+```{r, message = FALSE, warning = FALSE}
+ggplot(mkrf.6hr, aes(x = date, y = value)) +
+	geom_line(aes(y = co2_1)) + geom_line(aes(y = co2_2), col = "#696969") +
+	labs(x = "", y = bquote(CO[2] * " concentration (" * mu * "atm " * atm^{-1}*")"), 
+	title = "") +
+	ylim(1000,2000) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "co2_both_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Temp from upstream GS3:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = gs3_1_temp)) +
+	geom_line() + labs(x = "", y = "Stream temperature (ºC)", title = "")	+ 
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "temp_us_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+EC from upstream GS3:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = gs3_1_ec)) +
+	geom_line() + labs(x = "", y = expression(Electrical~Conductivity~(µS~cm^{-1})), 
+		title = "") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	ylim(10,16) +
+	scale_x_datetime(date_breaks = "1 month") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "EC_us_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Air temperature from anemometer:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = sonic_temp)) +
+	geom_line() + labs(x = "", y = "Air temperature (ºC)", title = "")	+ 
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "airtemp_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Wind speed:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = windspeed)) +
+	geom_line() + labs(x = "", y = bquote("Wind speed (m " * s^-1 *")"), 
+		title = "")	+ 
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "windspeed_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Wind rose (direction):
+```{r}
+openair::windRose(mkrf.30, ws = "windspeed", wd = "winddir", ws.int = 0.4)
+```
+
+Upstream pH:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = ph1)) +
+	geom_line() + labs(x = "", y = "pH", title = "") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month") +
+	ylim(6.4,7.2) +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "ph_us_ts.png", width = 8, height = 6, units = "in")
+```
+
+Discharge:
+```{r}
+mkrf.6hr <- mkrf.6hr[-861,]
+
+ggplot(mkrf.6hr, aes(x = date, y = q.salt)) +
+	geom_line() + labs(x = "", y = "Discharge (L/s)") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	ylim(0,600) +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "discharge_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Flow velocity:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = v.salt)) +
+	geom_line() + labs(x = "", y = expression(Velocity~(m~s^{-1})), title = "") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "flowvelocity_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Continuous k:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = k)) +
+	geom_line() + labs(x = "", y = expression(italic(k)[CO2]~(m/d)), 
+		title = "") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "k_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Continuous k600:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = k600)) +
+	geom_line() + labs(x = "", y = expression(italic(k)[600]~(m/d)), 
+		title = "") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "k600_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+Continuous flux:
+```{r}
+ggplot(mkrf.6hr, aes(x = date, y = flux)) +
+	geom_line() + labs(x = "", 
+		y = expression(italic(F)[CO2]~(g~C~m^{-2}~d^{-1})), 
+		title = "") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	scale_x_datetime(date_breaks = "1 month", date_labels = "%b %Y") +
+	theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#ggsave(filename = "flux_ts.pdf", width = 8, height = 6, units = "in")
+```
+
+## 4 Gas transfer velocity calculations
+
+### 4.1 Option 1: automated calculations
+
+#### 4.1.1 Calculations and dataframe creation
+For looping through all CO2 injection files and creation of dataframe with datetime, kco2, k600, mean stream temp, mean velocity, and mean discharge, use this chunk.
+* List files from directory with CO2 injections
+* Use lapply() to read all CSV files from list (dts)
+* Use lapply() to apply kcalcs function to all files to generate a list of dataframes with above variables (k.calcs)
+* Use do.call to rbind() the list of dataframes together into one dataframe (k.df)
+* Generate column names for new dataframe
+
+```{r, message = FALSE, warning = FALSE}
+mkrf.co2 <- list.files(path = "data/co2injections", pattern = "*.csv", 
+	full.names = T)
+dts <- lapply(mkrf.co2,read.csv) 
+k.calcs <- lapply(dts, kcalcs)
+k.df <- do.call(rbind, k.calcs)
+#colnames(k.df) <- c("dt", "k.m.d", "k600.m.d", "meantemp", "meanq", "meanv")
+```
+
+```{r, message = FALSE, warning = FALSE}
+mkrf.co2.new <- list.files(path = "data/co2injections/new data", 
+	pattern = "*.csv", full.names = T)
+dts.new <- lapply(mkrf.co2.new,read.csv) 
+k.calcs.new <- lapply(dts.new, kcalcs.new)
+k.df.new <- do.call(rbind, k.calcs.new)
+#colnames(k.df.new) <- c("dt", "k.m.d", "k600.m.d", "meantemp", "meanq", "meanv")
+```
+
+```{r, message = FALSE, warning = FALSE}
+k.df <- rbind(k.df, k.df.new)
+#write.csv(k.df, "kdf.csv")
+```
+
+```{r}
+mean(k.df$k.m.d, na.rm = T)
+median(k.df$k.m.d, na.rm = T)
+range(k.df$k.m.d, na.rm = T)
+mean(k.df$k600.m.d, na.rm = T)
+median(k.df$k600.m.d, na.rm = T)
+range(k.df$k600.m.d, na.rm = T)
+range(mkrf.30$q.salt, na.rm = T)
+var(log(k.df$k.m.d))
+var(log(k.df$k600.m.d))
+```
+
+```{r}
+k.df$qsepos <- k.df$meanq + sd(k.df$meanq) / sqrt(n_distinct(k.df$meanq))
+k.df$qseneg <- k.df$meanq - sd(k.df$meanq) / sqrt(n_distinct(k.df$meanq))
+```
+
+#### 4.1.2 Regression models
+
+##### 4.1.2.1 Linear regression models of log(k) and Q, V, T
+
+First, linear models of k and V, Q, T:
+
+**Linear model of log(k) vs mean discharge:**
+
+```{r}
+logk.q.lm <- lm(log(k.m.d) ~ meanq, data = k.df)
+summary(logk.q.lm)
+#var(log(k.df$k.m.d))
+#plot(logk.q.lm$residuals)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanq, y = log(k.m.d))) +
+	geom_point() +
+	#geom_point(aes(col = meantemp)) + 
+	geom_linerange(aes(ymin = log(k.lo), ymax = log(k.hi))) +
+	geom_errorbarh(aes(xmin = qseneg, xmax = qsepos)) +
+	labs(x = "Discharge (L/s)", 
+		y = expression(ln(italic(k)[CO2])~~(m/d)), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#scale_color_distiller(palette = "Spectral") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	theme(legend.position="none") +
+	ylim(2.5,6)
+```
+
+```{r}
+#ggsave(filename = "logk_q_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+**Linear model of log(k) vs mean velocity:**
+
+```{r}
+logk.v.lm <- lm(log(k.m.d) ~ meanv, data = k.df)
+summary(logk.v.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanv, y = log(k.m.d))) +
+	geom_point() + 
+	#geom_point(aes(col = meantemp)) + 
+	geom_linerange(aes(ymin = log(k.lo), ymax = log(k.hi), col = meantemp)) +
+	labs(x = expression(Stream~velocity~(m~s^{-1})), 
+		y = expression(log(italic(k)[CO2])~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#scale_color_distiller(palette = "Spectral") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	theme(legend.position="none") +
+	ylim(2.5,5.4)
+```
+
+```{r}
+#ggsave(filename = "logk_v_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+**Linear model of log(k) vs mean temperature:**
+
+```{r}
+logk.temp.lm <- lm(log(k.m.d) ~ meantemp, data = k.df)
+summary(logk.temp.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meantemp, y = log(k.m.d))) +
+	geom_point() + 
+	geom_linerange(aes(ymin = log(k.lo), ymax = log(k.hi))) +
+	labs(x = "Stream temperature (ºC)", 
+		y = expression(log(italic(k)[CO2])~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	ylim(2.5,5.4)
+```
+
+```{r}
+#ggsave(filename = "logk_t_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+##### 4.1.2.2 Linear regression models of log(k600) and Q, V, T
+
+**Linear model of log(k600) vs mean discharge:**
+
+```{r}
+logk600.q.lm <- lm(log(k600.m.d) ~ meanq, data = k.df)
+summary(logk600.q.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanq, y = log(k600.m.d))) +
+	geom_point() + 
+	geom_linerange(aes(ymin = log(k600.lo), ymax = log(k600.hi))) +
+	geom_errorbarh(aes(xmin = qseneg, xmax = qsepos)) +
+	labs(x = expression(Discharge~(L/s)), 
+		y = expression(ln(italic(k)[600])~(m/d)), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#scale_color_distiller(palette = "Spectral") +
+	theme(legend.position="none") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	ylim(2.5,6.0)
+```
+
+```{r}
+#ggsave(filename = "logk600_q_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+**Linear model of log(k600) vs mean velocity:**
+
+```{r}
+logk600.v.lm <- lm(log(k600.m.d) ~ meanv, data = k.df)
+summary(logk600.v.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanv, y = log(k600.m.d))) +
+	geom_point(aes(col=meantemp)) + 
+	geom_linerange(aes(ymin = log(k600.lo), ymax = log(k600.hi), col=meantemp)) +
+	labs(x = expression(Stream~velocity~(m~s^{-1})), 
+		y = expression(log(italic(k)[600])~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	scale_color_distiller(palette = "Spectral") +
+	theme(legend.position="none") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	ylim(2.5,6)
+```
+
+```{r}
+#ggsave(filename = "logk600_v_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+**Linear model of log(k600) vs mean temperature:**
+
+```{r}
+logk600.temp.lm <- lm(log(k600.m.d) ~ meantemp, data = k.df)
+summary(logk600.temp.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meantemp, y = log(k600.m.d))) +
+	geom_point() + geom_linerange(aes(ymin = log(k600.lo), ymax = log(k600.hi))) +
+	labs(x = "Stream temperature (ºC)", 
+		y = expression(log(italic(k)[600])~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#annotate("text", x = 0.09, y = 90, label = "y == mx + b \n R ^ 2 == 0.69", 
+		# parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	ylim(2.5,6)
+```
+
+```{r}
+#ggsave(filename = "logk600_t_lm.pdf", width = 8, height = 6, units = "in")
+```
+
+##### 4.1.2.3 weighted least squares models of k and Q, V, T
+
+```{r}
+k.q.gls <- gls(k.m.d ~ meanq, data = k.df)
+summary(k.q.gls)
+```
+
+##### 4.1.2.4 Linear regression models of k and Q, V, T
+
+First, linear models of k and V, Q, T:
+
+**Linear model of k vs mean discharge:**
+
+```{r}
+w <- loess(k.m.d ~ meanq, data = k.df)
+w <- w$residuals
+
+k.q.loess <- loess(k.m.d ~ meanq, data = k.df, 
+	weights = 1/w^2)
+summary(k.q.loess)
+plot(k.q.loess$residuals)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanq, y = k.m.d)) +
+	geom_point() + geom_linerange(aes(ymin = k.lo, ymax = k.hi)) +
+	labs(x = expression(Discharge~(L~s^{-1})), 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "loess") +
+	#annotate("text", x = 30, y = 90, label = "italic(R) ^ 2 == 0.70", 
+		#parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	coord_flip()
+```
+
+```{r}
+#ggsave(filename = "k_q_lm.png", width = 8, height = 6, units = "in")
+```
+
+**Linear model of k vs mean velocity:**
+
+```{r}
+wv <- loess(k.m.d ~ meanv, data = k.df)
+wv <- wv$residuals
+
+k.v.loess <- loess(k.m.d ~ meanv, data = k.df, weights = 1/wv^2)
+summary(k.v.loess)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanv, y = k.m.d)) +
+	geom_point() + geom_linerange(aes(ymin = k.lo, ymax = k.hi)) +
+	labs(x = expression(Stream~velocity~(m~s^{-1})), 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "loess") +
+	#annotate("text", x = 0.09, y = 90, label = "y == mx + b \n R ^ 2 == 0.69", 
+		#parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	coord_flip()
+```
+
+```{r}
+#ggsave(filename = "k_v_lm.png", width = 8, height = 6, units = "in")
+```
+
+**Linear model of k vs mean temperature:**
+
+```{r}
+wt <- loess(k.m.d ~ meantemp, data = k.df)
+wt <- wt$residuals
+
+k.temp.loess <- loess(k.m.d ~ meantemp, data = k.df, weights = 1/wt^2)
+summary(k.temp.loess)
+k.temp.loess$enp
+
+hist(k.temp.loess$residuals)
+```
+
+```{r}
+ggplot(k.df, aes(x = meantemp, y = k.m.d)) +
+	geom_point() + geom_linerange(aes(ymin = k.lo, ymax = k.hi)) +
+	labs(x = "Stream temperature (ºC)", 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "loess") +
+	#annotate("text", x = 0.09, y = 90, label = "y == mx + b \n R ^ 2 == 0.69", 
+		#parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	coord_flip()
+```
+
+```{r}
+#ggsave(filename = "k_t_lm.png", width = 8, height = 6, units = "in")
+```
+
+##### 4.1.2.5 Linear regression models of k600 and Q, V, T
+
+**Linear model of k600 vs mean discharge:**
+
+```{r}
+k600.q.lm <- lm(k600.m.d ~ meanq, data = k.df)
+summary(k600.q.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanq, y = k600.m.d)) +
+	geom_point() + geom_linerange(aes(ymin = k600.lo, ymax = k600.hi)) +
+	labs(x = expression(Discharge~(L~s^{-1})), 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#annotate("text", x = 30, y = 90, label = "italic(R) ^ 2 == 0.70", 
+		#parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	coord_flip()
+```
+
+```{r}
+#ggsave(filename = "k600_q_lm.png", width = 8, height = 6, units = "in")
+```
+
+**Linear model of k600 vs mean velocity:**
+
+```{r}
+k600.v.lm <- lm(k600.m.d ~ meanv, data = k.df)
+summary(k600.v.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meanv, y = k600.m.d)) +
+	geom_point() + geom_linerange(aes(ymin = k600.lo, ymax = k600.hi)) +
+	labs(x = expression(Stream~velocity~(m~s^{-1})), 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#annotate("text", x = 0.09, y = 90, label = "y == mx + b \n R ^ 2 == 0.69", 
+		#parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	coord_flip()
+```
+
+```{r}
+#ggsave(filename = "k600_v_lm.png", width = 8, height = 6, units = "in")
+```
+
+**Linear model of k600 vs mean temperature:**
+
+```{r}
+k600.temp.lm <- lm(k600.m.d ~ meantemp, data = k.df)
+summary(k600.temp.lm)
+```
+
+```{r}
+ggplot(k.df, aes(x = meantemp, y = k600.m.d)) +
+	geom_point() + geom_linerange(aes(ymin = k600.lo, ymax = k600.hi)) +
+	labs(x = "Stream temperature (ºC)", 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "") + 
+	geom_smooth(method = "lm") +
+	#annotate("text", x = 0.09, y = 90, label = "y == mx + b \n R ^ 2 == 0.69", 
+		#parse = T) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1))) +
+	coord_flip()
+```
+
+```{r}
+#ggsave(filename = "k600_t_lm.png", width = 8, height = 6, units = "in")
+```
+
+##### 4.1.2.6 Multiple linear regression models of log(k) and log(k600)
+
+**Multiple linear regression: predict log(k) from Q + Temp**
+
+```{r}
+logk.qt.lm <- lm(log(k.m.d) ~ meanq + meantemp, data = k.df)
+summary(logk.qt.lm)
+```
+
+**Multiple linear regression: predict log(k600) from Q + Temp**
+
+```{r}
+logk600.qt.lm <- lm(log(k600.m.d) ~ meanq + meantemp, data = k.df)
+summary(logk600.qt.lm)
+```
+
+**Multiple linear regression: predict log(k) from V + Temp**
+
+```{r}
+logk.vt.lm <- lm(log(k.m.d) ~ meanv + meantemp, data = k.df)
+summary(logk.vt.lm)
+```
+
+**Multiple linear regression: predict log(k600) from V + Temp**
+
+```{r}
+logk600.vt.lm <- lm(log(k600.m.d) ~ meanv + meantemp, data = k.df)
+summary(logk600.vt.lm)
+```
+
+##### 4.1.2.7 Multiple linear regression models of k and k600
+
+**Multiple linear regression: predict k from Q + Temp**
+
+```{r}
+k.qt.lm <- lm(k.m.d ~ meanq + meantemp, data = k.df)
+summary(k.qt.lm)
+```
+
+**Multiple linear regression: predict k600 from Q + Temp**
+
+```{r}
+k600.qt.lm <- lm(k600.m.d ~ meanq + meantemp, data = k.df)
+summary(k600.qt.lm)
+```
+
+**Multiple linear regression: predict k from V + Temp**
+
+```{r}
+k.vt.lm <- lm(k.m.d ~ meanv + meantemp, data = k.df)
+summary(k.vt.lm)
+```
+
+**Multiple linear regression: predict k600 from V + Temp**
+
+```{r}
+k600.vt.lm <- lm(k600.m.d ~ meanv + meantemp, data = k.df)
+summary(k600.vt.lm)
+```
+
+#### 4.1.3 Data visualization
+
+**Daytime vs nighttime**
+
+```{r}
+night.df <- subset(k.df, format(dt, "%H") == "10")
+night.df$time <- "night"
+
+day.df <- subset(k.df, format(dt, "%H") > "10")
+day.df$time <- "day"
+
+time.df <- rbind(night.df, day.df)
+```
+
+```{r}
+mean(night.df$k.m.d, na.rm = T)
+mean(night.df$k600.m.d, na.rm = T)
+
+mean(day.df$k.m.d, na.rm = T)
+mean(day.df$k600.m.d, na.rm = T)
+```
+
+```{r}
+ggplot(time.df, aes(x = time, y = k.m.d)) +
+	geom_boxplot() + 
+	ylim(0,200) +
+	labs(x = "", 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "")	+ 
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k_daynight.pdf", width = 8, height = 6, units = "in")
+```
+
+```{r}
+ggplot(time.df, aes(x = time, y = k600.m.d)) +
+	geom_boxplot() + 
+	ylim(0,300) +
+	labs(x = "", 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "")	+ 
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k600_daynight.pdf", width = 8, height = 6, units = "in")
+```
+
+**Low vs high discharge**
+
+```{r}
+hiq.df <- subset(k.df, meanq > 100)
+hiq.df$qlev <- "hiq"
+
+loq.df <- subset(k.df, meanq < 100)
+loq.df$qlev <- "loq"
+
+q.df <- rbind(hiq.df, loq.df)
+```
+
+```{r}
+mean(hiq.df$k.m.d, na.rm = T)
+mean(hiq.df$k600.m.d, na.rm = T)
+
+mean(loq.df$k.m.d, na.rm = T)
+mean(loq.df$k600.m.d, na.rm = T)
+```
+
+```{r}
+ggplot(q.df, aes(x = qlev, y = k.m.d)) +
+	geom_boxplot() + 
+	labs(x = "", 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High discharge", "Low discharge")) +
+	ylim(0,200) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k_hiloq.pdf", width = 8, height = 6, units = "in")
+```
+
+```{r}
+ggplot(q.df, aes(x = qlev, y = k600.m.d)) +
+	geom_boxplot() + 
+	ylim(0,300) +
+	labs(x = "", 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High discharge", "Low discharge")) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k600_hiloq.pdf", width = 8, height = 6, units = "in")
+```
+
+**Low vs high flow velocity**
+
+```{r}
+hiv.df <- subset(k.df, meanv > 0.13)
+hiv.df$vlev <- "hiv"
+
+lov.df <- subset(k.df, meanv < 0.13)
+lov.df$vlev <- "lov"
+
+v.df <- rbind(hiv.df, lov.df)
+```
+
+```{r}
+mean(hiv.df$k.m.d, na.rm = T)
+mean(hiv.df$k600.m.d, na.rm = T)
+
+mean(lov.df$k.m.d, na.rm = T)
+mean(lov.df$k600.m.d, na.rm = T)
+```
+
+```{r}
+ggplot(v.df, aes(x = vlev, y = k.m.d)) +
+	geom_boxplot() + 
+	ylim(0,200) +
+	labs(x = "", 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High velocity", "Low velocity")) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k_hilov.pdf", width = 8, height = 6, units = "in")
+```
+
+```{r}
+ggplot(v.df, aes(x = vlev, y = k600.m.d)) +
+	geom_boxplot() + 
+	ylim(0,300) +
+	labs(x = "", 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High velocity", "Low velocity")) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k600_hilov.pdf", width = 8, height = 6, units = "in")
+```
+
+**low vs high stream temperature**
+
+```{r}
+hitemp.df <- subset(k.df, meantemp > 10)
+hitemp.df$templev <- "hitemp"
+
+lotemp.df <- subset(k.df, meantemp < 10)
+lotemp.df$templev <- "lotemp"
+
+temp.df <- rbind(hitemp.df, lotemp.df)
+```
+
+```{r}
+mean(hitemp.df$k.m.d, na.rm = T)
+mean(hitemp.df$k600.m.d, na.rm = T)
+
+mean(lotemp.df$k.m.d, na.rm = T)
+mean(lotemp.df$k600.m.d, na.rm = T)
+```
+
+```{r}
+ggplot(temp.df, aes(x = templev, y = k.m.d)) +
+	geom_boxplot() + 
+	ylim(0,200) +
+	labs(x = "", 
+		y = expression(italic(k)[CO2]~(m~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High temperature", "Low temperature")) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k_hilotemp.pdf", width = 8, height = 6, units = "in")
+```
+
+```{r}
+ggplot(temp.df, aes(x = templev, y = k600.m.d)) +
+	geom_boxplot() + 
+	ylim(0,300) +
+	labs(x = "", 
+		y = expression(italic(k)[600]~(m~d^{-1})), 
+		title = "")	+
+	scale_x_discrete(labels = c("High temperature", "Low temperature")) +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1)))
+```
+
+```{r}
+#ggsave(filename = "k600_hilotemp.pdf", width = 8, height = 6, units = "in")
+```
+
+#### 4.1.4 Statistics
+
+**Pearson correlation coefficients**
+
+```{r}
+cor(k.df$meanq, k.df$k.m.d, method = "pearson", use = "pairwise.complete.obs")
+cor(k.df$meanv, k.df$k.m.d, method = "pearson", use = "pairwise.complete.obs")
+cor(k.df$meantemp, k.df$k.m.d, method = "pearson", use = "pairwise.complete.obs")
+
+cor(k.df$meanq, k.df$k600.m.d, method = "pearson", use = "pairwise.complete.obs")
+cor(k.df$meanv, k.df$k600.m.d, method = "pearson", use = "pairwise.complete.obs")
+cor(k.df$meantemp, k.df$k600.m.d, method = "pearson", use = "pairwise.complete.obs")
+```
+
+**Mann-Whitney-Wilcoxon tests**
+
+Discharge:
+```{r}
+wilcox.test(k.m.d ~ qlev, data=q.df)
+```
+
+```{r}
+wilcox.test(k600.m.d ~ qlev, data=q.df)
+```
+
+Velocity:
+```{r}
+wilcox.test(k.m.d ~ vlev, data=v.df)
+```
+
+```{r}
+wilcox.test(k600.m.d ~ vlev, data=v.df)
+```
+
+Temperature:
+```{r}
+wilcox.test(k.m.d ~ templev, data=temp.df)
+```
+
+```{r}
+wilcox.test(k600.m.d ~ templev, data=temp.df)
+```
+
+Day/night:
+```{r}
+wilcox.test(k.m.d ~ time, data=time.df)
+```
+
+```{r}
+wilcox.test(k600.m.d ~ time, data=time.df)
+```
+
+**T-tests**
+```{r}
+#t.test(hitemp.df$k.m.d, lotemp.df$k.m.d, paired=T)
+#t.test(hitemp.df$k600.m.d, lotemp.df$k600.m.d, paired=T)
+```
+
+### 4.2 Option 2: manual calculations
+
+Alternatively, for manual calculation of kco2 and k600 for each file, use the following chunks.
+First, read in CSV (mkrf.co2) and apply column changes.
+* Delete "record" row
+* Calculate discharge from q.salt function using depth
+* Calculate velocity from v.salt function using depth
+* Calculate travel time from t.salt function using depth
+
+```{r, eval = FALSE}
+mkrf.co2 <- read.csv(file.choose())
+mkrf.co2$record <- NULL
+mkrf.co2$q.salt <- q.salt(mkrf.co2$ctd2_depth)
+mkrf.co2$v.salt <- v.salt(mkrf.co2$ctd2_depth)
+mkrf.co2$t.salt <- t.salt(mkrf.co2$ctd2_depth)
+```
+
+Next, calibrate CO2 values from both sensors using co2calibrate function for temperature and pressure changes.
+* Apply CO2 calibrate to mkrf.co2 to generate dataframe (co2.cal) with two columns of calibrated CO2 values
+* Change CO2 columns in mkrf.co2 to include calibrated values
+
+```{r, eval=FALSE}
+co2.cal <- co2calibrate(mkrf.co2$co2_1,mkrf.co2$co2_2,mkrf.co2$gs3_1_temp,
+	mkrf.co2$gs3_2_temp,mkrf.co2$ctd1_depth,mkrf.co2$ctd2_depth)
+co2.cal <- as.data.frame(co2.cal)
+
+mkrf.co2$co2_1 <- co2.cal$co2_1
+mkrf.co2$co2_2 <- co2.cal$co2_2
+```
+
+Next, find relative CO2 changes between pre-injection and injection-equilibrated levels.
+* Find the mean of the lowest 10 observations for each sensor (min.co2_1 and min.co2_2) - this corresponds to pre-injection levels
+* Find the mean of highest 100 observations for each sensor (max.co2_1 and max.co2_2) - this corresponds to injection-equilibrated levels
+* Find the differences (max.co2 - min.co2) for each sensor - these are the values used in k calculation below
+
+```{r, eval=FALSE}
+co2_1.sort <- mkrf.co2[order(mkrf.co2$co2_1), ]
+min.co2_1 <- co2_1.sort[1:10, ]
+min.co2_1 <- mean(min.co2_1$co2_1)
+
+co2_2.sort <- mkrf.co2[order(mkrf.co2$co2_2), ]
+min.co2_2 <- co2_2.sort[1:10, ]
+min.co2_2 <- mean(min.co2_2$co2_2)
+
+co2_1.sort <- mkrf.co2[order(mkrf.co2$co2_1, decreasing = TRUE), ]
+max.co2_1 <- co2_1.sort[1:100, ]
+max.co2_1 <- mean(max.co2_1$co2_1)
+
+co2_2.sort <- mkrf.co2[order(mkrf.co2$co2_2, decreasing = TRUE), ]
+max.co2_2 <- co2_2.sort[1:100, ]
+max.co2_2 <- mean(max.co2_2$co2_2)
+
+co2_1.rel <- max.co2_1 - min.co2_1
+co2_2.rel <- max.co2_2 - min.co2_2
+```
+
+Finally, calculate kco2 (k.m.d) and k600 (k600.m.d) in meters/day using: 
+* Relative CO2 changes
+* Mean temperature (based on GS3 temperature values except where not applicable)
+* Mean travel time (based on t.salt, from depth)
+* Mean depth (based on CTD depths)
+
+```{r, eval=FALSE}
+CO2.1 <- co2_1.rel
+CO2.2 <- co2_2.rel
+Tw.1 <- mean(mkrf.co2$gs3_1_temp)
+Tw.2 <- mean(mkrf.co2$gs3_2_temp)
+t <- mean(mkrf.co2$t.salt)
+d <- mean(c(mkrf.co2$ctd1_depth, mkrf.co2$ctd2_depth))
+
+CO2.1 <- mean(k.df$CO2.1)
+CO2.2 <- mean(k.df$CO2.2)
+t <- mean(k.df$t)
+d <- mean(k.df$d)
+
+Tw.1 <- 10
+Tw.2 <- 10
+
+k.m.d <- kco2(CO2.1, CO2.2, Tw.1, Tw.2, t, d)
+
+Tw.mean <- (Tw.1 + Tw.2)/2
+k600.m.d <- k600(k.m.d, Tw.mean)
+```
+
+## 5 Raymond Model calculations
+
+### 5.1 Option 1: automated calculations
+
+For looping through all CO2 injection files and creation of dataframe with datetime, k600, model name, mean stream temp, mean velocity, and mean discharge, use this chunk.
+* List files from directory with CO2 injections
+* Use lapply() to read all CSV files from list (dts)
+* Use lapply() to apply raymondmodels function to all files to generate a list of dataframes with above variables (raymond.calcs)
+* Use do.call to rbind() the list of dataframes together into one dataframe (raymond.df)
+* Generate column names for new dataframe
+
+```{r}
+source("scripts/raymondmodels_function.R")
+source("scripts/raymondmodels_new_function.R")
+```
+
+```{r}
+mkrf.co2 <- list.files(path = "spreadsheets/co2injections", pattern = "*.csv", 
+	full.names = T)
+dts <- lapply(mkrf.co2,read.csv) 
+raymond.calcs <- lapply(dts, raymondmodels)
+raymond.df <- do.call(rbind, raymond.calcs)
+#raymond.df <- raymond.df[-c(11,12,18),]
+```
+
+```{r}
+mkrf.co2.new <- list.files(path = "spreadsheets/co2injections/new data", 
+	pattern = "*.csv", full.names = T)
+dts.new <- lapply(mkrf.co2.new,read.csv) 
+raymond.calcs.new <- lapply(dts.new, raymondmodels.new)
+raymond.df.new <- do.call(rbind, raymond.calcs.new)
+```
+
+```{r}
+raymond.df <- rbind(raymond.df, raymond.df.new)
+```
+
+```{r}
+k.real <- k.df$k600.m.d
+raymond.df$k.real <- k.real
+raymond.df$k.hi <- k.df$k600.hi
+raymond.df$k.lo <- k.df$k600.lo
+```
+
+```{r}
+raymond.df$modlo <- raymond.df$model - raymond.df$modelsd
+raymond.df$modhi <- raymond.df$model + raymond.df$modelsd
+```
+
+```{r}
+raymond.df$corr <- raymond.df$model - mean(raymond.df$model-raymond.df$k.real)
+```
+
+#### 5.1.1 Statistics
+
+```{r}
+mean(raymond.df$model)
+mean(raymond.df$k.real)
+median(raymond.df$model)
+range(raymond.df$model)
+mean(raymond.df$model-raymond.df$k.real)
+mean(raymond.df$model-raymond.df$k.real)/mean(raymond.df$k.real)
+25.3/106.1*100
+```
+
+```{r}
+#cor(raymond.df$model,raymond.df$k.real, method = "pearson", 
+	#use = "pairwise.complete.obs")
+#cor(raymond.df$corr,raymond.df$k.real, method = "pearson", 
+	#use = "pairwise.complete.obs")
+```
+
+**linear model between measured k and modeled k**
+
+```{r}
+raymond.lm <- lm(model ~ k.real, data = raymond.df)
+summary(raymond.lm)
+#modelr::rmse(raymond.lm, data = raymond.df)
+```
+
+```{r}
+raymond.corr.lm <- lm(corr ~ k.real, data = raymond.df)
+summary(raymond.corr.lm)
+```
+
+#### 5.1.2 Evasion estimates based on Raymond models
+
+```{r, eval = F}
+raymond.df$co2_1 <- k.df$min.co2_1
+
+co2aq <- raymond.df$co2_1
+Tw <- raymond.df$meantemp
+co2air <- 427
+k <- raymond.df$model
+	
+Tw.K <- Tw + 273.15
+T_K <- 273.15 + 25 # temp in K at STP
+Kh.CO2.stp <- 0.035
+T_depend.CO2 <- 2400 #temperature dependency constant for CO2
+Kh.CO2 <- Kh.CO2.stp*exp(T_depend.CO2*(1/Tw.K - 1/T_K))
+
+flux <- k*(co2aq - co2air)*Kh.CO2*12*1000*1e-6
+mean(flux)*24
+median(flux)*24
+range(flux)*24
+```
+
+#### 5.1.3 Data visualization
+
+```{r}
+ggplot(raymond.df, aes(x = k.real, y = model)) +
+	geom_point() + geom_errorbarh(aes(xmin = k.lo, xmax = k.hi, height = 0)) +
+	geom_errorbar(aes(ymin = modlo, ymax = modhi)) +
+	labs(x = expression(Measured~italic(k)[600]~(m~d^{-1})), 
+		y = expression(Modeled~italic(k)[600]~(m~d^{-1})), 
+		title = "")	+ 
+	geom_abline(slope = 1, col = "black", linetype = 2) +
+	geom_smooth(method = "lm", col = "black") +
+	lims(x = c(0,300)) +
+	theme(plot.title = element_text(size = rel(1.5)), 
+		axis.title = element_text(size = rel(1.3)),
+		axis.text = element_text(size = rel(1.1))) 
+```
+
+```{r}
+#ggsave(filename = "raymondmodel.pdf", width = 8, height = 6, units = "in")
+```
+
+```{r}
+ggplot(raymond.df, aes(x = k.real, y = corr)) +
+	geom_point() + labs(x = expression(Measured~italic(k)[600]~(m~d^{-1})), 
+		y = expression(Modeled~italic(k)[600]~(m~d^{-1})), 
+		title = expression(Measured~italic(k)[600]~vs~modeled~italic(k)[600]))	+ 
+	geom_abline(slope = 1, col = "red") +
+	geom_smooth(method = "lm") +
+	lims(x = c(0,110), y = c(0, 200)) +
+	theme(plot.title = element_text(size = rel(1.5)), 
+		axis.title = element_text(size = rel(1.3)),
+		axis.text = element_text(size = rel(1.1)))
+```
+
+```{r}
+#ggsave(filename = "raymondmodel_cor.png", width = 8, height = 6, units = "in")
+```
+
+### 5.2 Option 2: manual calculations
+
+Alternatively, for manual calculation of modeled k600 for each file, use the following chunks.
+First, read in CSV (mkrf.co2) and apply column changes.
+* Delete "record" row
+* Calculate discharge from q.salt function using depth
+* Calculate velocity from v.salt function using depth
+* Calculate travel time from t.salt function using depth
+
+```{r, eval=FALSE}
+mkrf.co2 <- read.csv(file.choose())
+mkrf.co2$record <- NULL
+mkrf.co2$q.salt <- q.salt(mkrf.co2$ctd2_depth)
+mkrf.co2$v.salt <- v.salt(mkrf.co2$ctd2_depth)
+mkrf.co2$t.salt <- t.salt(mkrf.co2$ctd2_depth)
+```
+
+Next, define variables for use in raymondmodelsmanual function (source: raymondmodels_manual_function.R). These are:
+* V (velocity): mean velocity from salt injection (v.salt)
+* S (slope): 0.236
+* D (depth): mean depth from both CTDs
+* Q (discharge): mean discharge from salt injection (q.salt)
+* Output is k.model (list)
+
+```{r, eval=FALSE}
+V <- mean(mkrf.co2$v.salt)
+S <- 0.236
+D <- mean(mean(c(mkrf.co2$ctd1_depth, mkrf.co2$ctd2_depth)))
+Q <- mean(mkrf.co2$q.salt)
+k.model <- raymondmodelsmanual(V, S, D, Q)
+```
+
+For data visualization: subset and melt dataframe for plotting
+```{r, eval=FALSE}
+mkrf.co2.subset <- subset.data.frame(mkrf.co2, select = timestamp:co2_2)
+mkrf.co2.melt <- melt(mkrf.co2.subset, variable.name = "sensor", value.name = "co2", 
+	id.vars = "timestamp")
+
+mkrf.co2.melt$timestamp <- as.POSIXct(mkrf.co2.melt$timestamp)
+
+cbPalette <- c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+	"#D55E00", "#CC79A7")
+```
+
+```{r, eval=FALSE}
+#lims <- as.POSIXct(strptime(c("06:05:00","07:45:00"), format = "%H:%M:%S"))
+#limits = lims, (in scale_x_datetime)
+
+ggplot(mkrf.co2.melt, aes(timestamp, co2, col=sensor)) + geom_point() + geom_jitter() +
+	scale_x_datetime(date_labels = ("%H:%M")) +
+	labs(x = "", y = bquote(CO[2] * " concentration (ppm)"), 
+	title = bquote(bold(CO[2] * " concentration during injection"))) + 
+	scale_colour_manual(labels = c("Upstream", "Downstream"),
+		values = c(cbPalette[7], cbPalette[4])) + 
+	theme_cowplot() + theme(legend.position="none") +
+	theme(plot.title = element_text(size = rel(1.3)), 
+		axis.title = element_text(size = rel(1.2)),
+		axis.text = element_text(size = rel(1.1)))
+```
+
+```{r, eval=FALSE}
+#ggsave(filename = "k_mar22.png", width = 8, height = 6, units = "in")
+```
+
