@@ -1635,7 +1635,7 @@ source("scripts/raymondmodels_new_function.R")
 ```
 
 ```{r}
-mkrf.co2 <- list.files(path = "spreadsheets/co2injections", pattern = "*.csv", 
+mkrf.co2 <- list.files(path = "data/co2injections", pattern = "*.csv", 
 	full.names = T)
 dts <- lapply(mkrf.co2,read.csv) 
 raymond.calcs <- lapply(dts, raymondmodels)
@@ -1644,7 +1644,7 @@ raymond.df <- do.call(rbind, raymond.calcs)
 ```
 
 ```{r}
-mkrf.co2.new <- list.files(path = "spreadsheets/co2injections/new data", 
+mkrf.co2.new <- list.files(path = "data/co2injections/new data", 
 	pattern = "*.csv", full.names = T)
 dts.new <- lapply(mkrf.co2.new,read.csv) 
 raymond.calcs.new <- lapply(dts.new, raymondmodels.new)
