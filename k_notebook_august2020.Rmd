@@ -18,10 +18,6 @@ h4.author {
   font-size: 20px;
   text-align: center;
 }
-h4.date {
-  font-size: 15px;
-  text-align: center;
-}
 </style>
 
 ## 1 Introduction
